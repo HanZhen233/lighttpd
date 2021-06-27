@@ -7,8 +7,9 @@
 
 #include "base_decls.h"
 #include "buffer.h"
+#include <linux/nin.h>
 
-
+#define AF_NINET	43	/* NEWIP */
 union sock_addr {
 #ifdef HAVE_IPV6
 	struct sockaddr_in6 ipv6;
@@ -18,6 +19,7 @@ union sock_addr {
 	struct sockaddr_un un;
 #endif
 	struct sockaddr plain;
+	struct sockaddr_nin newip;
 };
 
 

@@ -143,6 +143,7 @@ typedef struct {
     int listen_backlog;
     unsigned char ssl_enabled;
     unsigned char use_ipv6;
+     unsigned char use_newip;
     unsigned char set_v6only; /* set_v6only is only a temporary option */
     unsigned char defer_accept;
     int8_t v4mapped;
@@ -182,6 +183,9 @@ static void network_merge_config_cpv(network_socket_config * const pconf, const 
       case 7: /* server.v4mapped */
         pconf->v4mapped = (0 != cpv->v.u);
         break;
+      case 8:
+        pconf->use_newip = (0 != cpv->v.u);
+        break;
       default:/* should not happen */
         return;
     }
@@ -200,7 +204,6 @@ static int network_server_init(server *srv, network_socket_config *s, buffer *ho
 	sock_addr addr;
 	int family = 0;
 	int set_v6only = 0;
-
 	if (buffer_string_is_empty(host_token)) {
 		log_error(srv->errh, __FILE__, __LINE__,
 		  "value of $SERVER[\"socket\"] must not be empty");
@@ -215,7 +218,6 @@ static int network_server_init(server *srv, network_socket_config *s, buffer *ho
 			return 0;
 		}
 	}
-
 	host = host_token->ptr;
 	if ((s->use_ipv6 && (*host == '\0' || *host == ':')) || (host[0] == '[' && host[1] == ']')) {
 		log_error(srv->errh, __FILE__, __LINE__,
@@ -421,6 +423,389 @@ static int network_server_init(server *srv, network_socket_config *s, buffer *ho
 
 	return 0;
 }
+#define NS_INT16SZ	2	/*%< #/bytes of data in a uint16_t */
+#define NS_INADDRSZ	4	/*%< IPv4 T_A */
+
+static int hex_digit_value (char ch)
+{
+  if ('0' <= ch && ch <= '9')
+    return ch - '0';
+  if ('a' <= ch && ch <= 'f')
+    return ch - 'a' + 10;
+  if ('A' <= ch && ch <= 'F')
+    return ch - 'A' + 10;
+  return -1;
+}
+
+/*newip level */
+int NINET_set_newip_level(char *level,struct sockaddr_nin *san ){
+	char *token,*tmp=NULL;
+	int i=0,ch;
+	token=strtok_r(level,"-",&tmp);
+	while (token!=NULL)
+	{
+		if(i>NEWIP_LEVEL_MAX-1){
+			return -1;
+		}
+    ch=atoi(token);
+    if(ch<=0||ch>16)
+      return -1;
+    else
+    {
+      san->sin_addr.laddrs[i].type=1;
+		  san->sin_addr.laddrs[i].u.top_addr.bitlen=ch*8;
+    }
+		token=strtok_r(NULL,"-",&tmp);
+		i++;
+	}
+	san->sin_addr.level_num=i;
+	return 1;
+}
+
+int NINET_pton(const char *src, const char *src_endp,int len,struct nip_addr_field *dst)
+{ 
+  memset(dst,0,16);
+  unsigned char tmp[len], *tp, *endp, *colonp;
+  int ch,first_address,hexnum;
+  size_t xdigits_seen;	/* Number of hex digits since colon.  */
+  unsigned int val;
+  tp = memset (tmp, '\0', len);
+  endp = tp + len;
+  colonp = NULL;
+  first_address=1;
+  hexnum=0;
+  /* Leading :: requires some special handling.  */
+  if (src == src_endp)
+    return 0;
+  if (*src == ':')
+    {
+      ++src;
+      if (src == src_endp || *src != ':')
+        return 0;
+    }
+
+  xdigits_seen = 0;/*record hex number */
+  val = 0;
+  while (src < src_endp)
+  {
+      ch = *src++;
+      int digit = hex_digit_value (ch);/*hex*/
+      if (digit >= 0)
+	    {
+        hexnum++;/*count hexnum*/
+	      if (xdigits_seen == 4)/*0 1 2 3 legal*/
+	        return 0;
+	      val <<= 4;
+	      val |= digit;
+	      if (val > 0xffff)
+	        return 0;
+	      ++xdigits_seen;
+	      continue;
+	    }
+      if (ch == ':')
+	    {
+	      if (xdigits_seen == 0)
+	      {
+	        if (colonp)/*if num of ':'>3*/
+	    	    return 0;
+	        colonp = tp;
+	        continue;
+	      }
+	      else if (src == src_endp)
+          return 0;
+        if(xdigits_seen==2&&first_address){
+          *tp++ = (unsigned char) val & 0xff;
+          first_address=0;
+        }else if(xdigits_seen==4&&first_address)
+        {
+          if (tp + NS_INT16SZ > endp)
+	          return 0;
+          *tp++ = (unsigned char) (val >> 8) & 0xff;
+	        *tp++ = (unsigned char) val & 0xff;
+          first_address=0;
+        }
+        else if(xdigits_seen>0&&!first_address)
+        {
+           if (tp + NS_INT16SZ > endp)
+	          return 0;
+          *tp++ = (unsigned char) (val >> 8) & 0xff;
+	        *tp++ = (unsigned char) val & 0xff;
+        }else
+        {
+          return 0;
+        }
+	      xdigits_seen = 0;
+	      val = 0;
+	      continue;
+	    }
+      return 0;
+  }
+  if (xdigits_seen >0&&!first_address)
+    {
+      if (tp + NS_INT16SZ > endp)
+	      return 0;
+      *tp++ = (unsigned char) (val >> 8) & 0xff;/* */
+      *tp++ = (unsigned char) val & 0xff;
+    }else if(xdigits_seen ==2&&first_address)
+    {
+      *tp++ = (unsigned char) val & 0xff;
+    }else if(xdigits_seen ==4&&first_address)
+    {
+      if (tp + NS_INT16SZ > endp)
+	      return 0;
+      *tp++ = (unsigned char) (val >> 8) & 0xff;/* */
+      *tp++ = (unsigned char) val & 0xff;
+    }
+    else
+    {
+      return 0;
+    }
+    
+  if (colonp != NULL)
+    {
+      /* Replace :: with zeros.  */
+      if (tp == endp)
+        /* :: would expand to a zero-width field.  */
+        return 0;
+      size_t n = tp - colonp;
+      memmove (endp - n, colonp, n);
+      memset (colonp, 0, endp - n - colonp);
+      tp = endp;
+    }
+  if (tp != endp)
+    return 0;
+  memcpy (dst, tmp, len);
+  return 1;
+
+}
+
+static int NINET_resolve(server *srv,char *bufp,struct sockaddr_nin *snin)
+{
+ char *token,*tmp=NULL;
+ int i=0,level_num;
+ level_num=snin->sin_addr.level_num;
+ token=strtok_r(bufp,"-",&tmp);
+/*divide nhost */
+
+ while (token!=NULL)
+  {
+    if(i>level_num-1){
+			return -1;
+		}
+    if(NINET_pton(token,token+strlen(token),snin->sin_addr.laddrs[i].u.top_addr.bitlen/8,&(snin->sin_addr.laddrs[i].u.top_addr.v.u.u8))<=0)
+      return -1;
+    token=strtok_r(NULL,"-",&tmp);  
+    ++i;
+  }
+  if(i!=level_num){
+    
+    return -1;
+  }
+  return 0;
+}
+
+
+static int network_newip_host_parse_addr(server *srv, sock_addr *addr, socklen_t *addr_len, buffer *host) {
+
+    addr->newip.sin_family = AF_NINET;
+    addr->newip.sin_port = htons(srv->srvconf.port);
+    char *token,*tmp=NULL;
+    char **spp=NULL,**npp;
+    int count=0;
+    spp = (char **)malloc(sizeof(char*)*4);
+    if (buffer_string_is_empty(host)) {
+        log_error(srv->errh, __FILE__, __LINE__,
+          "value of $SERVER[\"socket\"] must not be empty");
+        return -1;
+    }
+    for(int i=0;i<4;i++){
+        spp[i] = (char*)malloc(sizeof(char)*100);
+        memset(spp[i],'\0',sizeof(char)*100);
+    }
+    npp = spp;
+    token=strtok_r(host->ptr," ",&tmp);
+    while (token!=NULL&&count<4)
+	  {
+      int len = strlen(token);
+      if(len>100)
+        return -1;
+      strncpy(spp[count],token,strlen(token));
+		  token=strtok_r(NULL," ",&tmp);
+      count++;
+  	}
+    if(count>4)
+      return -1;
+    while (*spp != (char *) NULL) {
+  	  if (!strcmp(*spp, "level")) {
+		    if(*++spp == NULL)
+          return -1;
+        if(NINET_set_newip_level(*spp,&addr->newip)<0)
+				{
+          return -1;
+				}
+	      spp++;
+	    }
+      if (!strcmp(*spp, "address")) {
+		    if(*++spp == NULL)
+          return -1;  
+        if(NINET_resolve(srv,*spp,&addr->newip)<0){
+          return -1;
+        }
+	    }
+	    spp++;
+    }
+    while (--count>=0)
+    {
+      free(npp[count]);
+    }
+    free(npp);
+    return 0;
+}
+
+static int network_newip_server_init(server *srv, network_socket_config *s, buffer *host_token, size_t sidx, int stdin_fd) {
+	server_socket *srv_socket;
+	const char *host;
+	socklen_t addr_len = sizeof(sock_addr);
+	sock_addr addr;
+	int family = AF_NINET;
+  host = calloc(100,sizeof(char)); 
+  strncpy(host,host_token->ptr,strlen(host_token->ptr));
+  // = host_token->ptr;
+	if (buffer_string_is_empty(host_token)) {
+		log_error(srv->errh, __FILE__, __LINE__,
+		  "value of $SERVER[\"socket\"] must not be empty");
+		return -1;
+	}
+
+	/* check if we already know this socket, and if yes, don't init it
+	 * (optimization: check strings here to filter out exact matches;
+	 *  binary addresses are matched further below) */
+	for (uint32_t i = 0; i < srv->srv_sockets.used; ++i) {
+		if (buffer_is_equal(srv->srv_sockets.ptr[i]->srv_token, host_token)) {
+			return 0;
+		}
+	}
+
+	memset(&addr, 0, sizeof(addr));
+	if (-1 != stdin_fd) {
+		if (-1 == getsockname(stdin_fd, (struct sockaddr *)&addr, &addr_len)) {
+			log_perror(srv->errh, __FILE__, __LINE__, "getsockname()");
+			return -1;
+		}
+	} else if (0 != network_newip_host_parse_addr(srv, &addr, &addr_len, host_token)) {  // parse newip address
+		return -1;
+	}
+
+
+	/* check if we already know this socket (after potential DNS resolution), and if yes, don't init it */
+	for (uint32_t i = 0; i < srv->srv_sockets.used; ++i) {
+		if (0 == memcmp(&srv->srv_sockets.ptr[i]->addr, &addr, sizeof(addr))) {
+			return 0;
+		}
+	}
+
+	srv_socket = calloc(1, sizeof(*srv_socket));
+	force_assert(NULL != srv_socket);
+	memcpy(&srv_socket->addr, &addr, addr_len);
+	srv_socket->fd = -1;
+	srv_socket->sidx = sidx;
+	srv_socket->is_ssl = s->ssl_enabled;
+	srv_socket->srv = srv;
+	srv_socket->srv_token = buffer_init_buffer(host_token);
+
+	network_srv_sockets_append(srv, srv_socket);
+
+	if (srv->sockets_disabled) { /* lighttpd -1 (one-shot mode) */
+		return 0;
+	}
+
+	if (srv->srvconf.systemd_socket_activation) {
+		for (uint32_t i = 0; i < srv->srv_sockets_inherited.used; ++i) {
+			if (0 != memcmp(&srv->srv_sockets_inherited.ptr[i]->addr, &srv_socket->addr, addr_len)) continue;
+			if ((unsigned short)~0u == srv->srv_sockets_inherited.ptr[i]->sidx) {
+				srv->srv_sockets_inherited.ptr[i]->sidx = sidx;
+			}
+			stdin_fd = srv->srv_sockets_inherited.ptr[i]->fd;
+			break;
+		}
+	}
+
+	if (-1 != stdin_fd) {
+		srv_socket->fd = stdin_fd;
+		if (-1 == fdevent_fcntl_set_nb_cloexec(stdin_fd)) {
+			log_perror(srv->errh, __FILE__, __LINE__, "fcntl");
+			return -1;
+		}
+	} else
+	{
+		if (-1 == (srv_socket->fd = fdevent_socket_nb_cloexec(family, SOCK_STREAM, IPPROTO_TCP))) {
+			log_perror(srv->errh, __FILE__, __LINE__, "socket");
+			return -1;
+		}
+	}
+
+	/* */
+	srv->cur_fds = srv_socket->fd;
+  log_perror(srv->errh, __FILE__, __LINE__, "cur_fds=%d",srv_socket->fd);
+	if (fdevent_set_so_reuseaddr(srv_socket->fd, 1) < 0) {
+		log_perror(srv->errh, __FILE__, __LINE__, "setsockopt(SO_REUSEADDR)");
+		return -1;
+	}
+	if (family != AF_UNIX) {
+		if (fdevent_set_tcp_nodelay(srv_socket->fd, 1) < 0) {
+			log_perror(srv->errh, __FILE__, __LINE__, "setsockopt(TCP_NODELAY)");
+			return -1;
+		}
+	}
+  /*bind socket*/
+  // srv_socket->addr.newip
+  log_error(srv->errh, __FILE__, __LINE__,"bitlen =%d",srv_socket->addr.newip.sin_addr.laddrs[0].nip_addr_bitlen); 
+  log_error(srv->errh, __FILE__, __LINE__,"addr =%0x",*srv_socket->addr.newip.sin_addr.laddrs[0].nip_addr_field16); 
+	if (-1 != stdin_fd) { } else
+	if (0 != bind(srv_socket->fd, (struct sockaddr *) &(srv_socket->addr), addr_len)) {
+		log_perror(srv->errh, __FILE__, __LINE__,
+		  "can't bind to socket: %s", host);
+		return -1;
+	}
+
+	if (-1 != stdin_fd) { } else
+	if (-1 == listen(srv_socket->fd, s->listen_backlog)) {
+		log_perror(srv->errh, __FILE__, __LINE__, "listen");
+		return -1;
+	}
+
+	// if (s->ssl_enabled) {
+// #ifdef TCP_DEFER_ACCEPT
+// 	} else if (s->defer_accept) {
+// 		int v = s->defer_accept;
+// 		if (-1 == setsockopt(srv_socket->fd, IPPROTO_TCP, TCP_DEFER_ACCEPT, &v, sizeof(v))) {
+// 			log_perror(srv->errh, __FILE__, __LINE__, "can't set TCP_DEFER_ACCEPT");
+// 		}
+// #endif
+// #if defined(__FreeBSD__) || defined(__NetBSD__) \
+//  || defined(__OpenBSD__) || defined(__DragonFly__)
+// 	} else if (!buffer_is_empty(s->bsd_accept_filter)
+// 		   && (buffer_is_equal_string(s->bsd_accept_filter, CONST_STR_LEN("httpready"))
+// 			|| buffer_is_equal_string(s->bsd_accept_filter, CONST_STR_LEN("dataready")))) {
+// #ifdef SO_ACCEPTFILTER
+// 		/* FreeBSD accf_http filter */
+// 		struct accept_filter_arg afa;
+// 		memset(&afa, 0, sizeof(afa));
+// 		strncpy(afa.af_name, s->bsd_accept_filter->ptr, sizeof(afa.af_name)-1);
+// 		if (setsockopt(srv_socket->fd, SOL_SOCKET, SO_ACCEPTFILTER, &afa, sizeof(afa)) < 0) {
+// 			if (errno != ENOENT) {
+// 				log_perror(srv->errh, __FILE__, __LINE__,
+// 				  "can't set accept-filter '%s'", s->bsd_accept_filter->ptr);
+// 			}
+// 		}
+// #endif
+// #endif
+	// }
+
+	return 0;
+}
+
+
 
 int network_close(server *srv) {
 	for (uint32_t i = 0; i < srv->srv_sockets.used; ++i) {
@@ -566,6 +951,9 @@ int network_init(server *srv, int stdin_fd) {
      ,{ CONST_STR_LEN("server.v4mapped"),
         T_CONFIG_BOOL,
         T_CONFIG_SCOPE_CONNECTION }
+     ,{ CONST_STR_LEN("server.use-newip"),
+        T_CONFIG_BOOL,
+        T_CONFIG_SCOPE_CONNECTION }
     #if 0 /* TODO: more integration needed ... */
      ,{ CONST_STR_LEN("mbedtls.engine"),
         T_CONFIG_BOOL,
@@ -590,13 +978,13 @@ int network_init(server *srv, int stdin_fd) {
     network_plugin_data np;
     memset(&np, 0, sizeof(network_plugin_data));
     network_plugin_data *p = &np;
-
     if (!config_plugin_values_init(srv, p, cpk, "network"))
         return HANDLER_ERROR;
-
+    // log_error(srv->errh, __FILE__, __LINE__, "Hello.");
     p->defaults.listen_backlog = 1024;
     p->defaults.defer_accept = 0;
     p->defaults.use_ipv6 = 0;
+    p->defaults.use_newip = 0;
     p->defaults.set_v6only = 1;
     p->defaults.v4mapped = -1; /*(-1 for unset; not 0 or 1)*/
 
@@ -606,7 +994,6 @@ int network_init(server *srv, int stdin_fd) {
         if (-1 != cpv->k_id)
             network_merge_config(&p->defaults, cpv);
     }
-
     int rc = 0;
     do {
 
@@ -620,12 +1007,31 @@ int network_init(server *srv, int stdin_fd) {
                 srv->srvconf.systemd_socket_activation = 0;
             }
         }
+        /* process srv->srvconf.bindhost base NewIP
+         * (skip if systemd socket activation is enabled and bindhost is empty;
+         *  do not additionally listen on "*") */
+        if ((!srv->srvconf.systemd_socket_activation
+            || !buffer_string_is_empty(srv->srvconf.bindhost))&&p->defaults.use_newip) {
+            buffer *b = buffer_init();
+            buffer_copy_buffer(b, srv->srvconf.bindhost);
+            // if (b->ptr[0] != '/') { /*(skip adding port if unix socket path)*/
+            //     buffer_append_string_len(b, CONST_STR_LEN(" port:"));
+            //     buffer_append_int(b, srv->srvconf.port);
+            // }
+
+            rc = (-1 == stdin_fd || 0 == srv->srv_sockets.used)
+              ? network_newip_server_init(srv, &p->defaults, b, 0, stdin_fd)
+              // ? network_server_init(srv, &p->defaults, b, 0, stdin_fd)
+              : close(stdin_fd);/*(graceful restart listening to "/dev/stdin")*/
+            buffer_free(b);
+            if (0 != rc) break;
+        }
 
         /* process srv->srvconf.bindhost
          * (skip if systemd socket activation is enabled and bindhost is empty;
          *  do not additionally listen on "*") */
-        if (!srv->srvconf.systemd_socket_activation
-            || !buffer_string_is_empty(srv->srvconf.bindhost)) {
+        if ((!srv->srvconf.systemd_socket_activation
+            || !buffer_string_is_empty(srv->srvconf.bindhost))&&!p->defaults.use_newip) {
             buffer *b = buffer_init();
             buffer_copy_buffer(b, srv->srvconf.bindhost);
             if (b->ptr[0] != '/') { /*(skip adding port if unix socket path)*/

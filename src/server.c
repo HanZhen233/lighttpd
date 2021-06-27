@@ -1091,7 +1091,6 @@ static int server_main_setup (server * const srv, int argc, char **argv) {
 			return -1;
 		}
 	}
-
       #ifdef __CYGWIN__
 	if (!srv->config_data_base && NULL != getenv("NSSM_SERVICE_NAME")) {
 		char *dir = getenv("NSSM_SERVICE_DIR");
