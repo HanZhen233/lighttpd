@@ -366,7 +366,10 @@ static int network_server_init(server *srv, network_socket_config *s, buffer *ho
 		}
 	}
 
-	if (-1 != stdin_fd) { } else
+	if (-1 != stdin_fd) {
+    	log_perror(srv->errh, __FILE__, __LINE__,
+		  "before bind socket exists: %s",stdin_fd);
+  } else
 	if (0 != bind(srv_socket->fd, (struct sockaddr *) &(srv_socket->addr), addr_len)) {
 		log_perror(srv->errh, __FILE__, __LINE__,
 		  "can't bind to socket: %s", host);
@@ -670,7 +673,6 @@ static int network_newip_server_init(server *srv, network_socket_config *s, buff
 	int family = AF_NINET;
   host = calloc(100,sizeof(char)); 
   strncpy(host,host_token->ptr,strlen(host_token->ptr));
-  // = host_token->ptr;
 	if (buffer_string_is_empty(host_token)) {
 		log_error(srv->errh, __FILE__, __LINE__,
 		  "value of $SERVER[\"socket\"] must not be empty");
@@ -703,7 +705,7 @@ static int network_newip_server_init(server *srv, network_socket_config *s, buff
 			return 0;
 		}
 	}
-
+  host_token->ptr = host;
 	srv_socket = calloc(1, sizeof(*srv_socket));
 	force_assert(NULL != srv_socket);
 	memcpy(&srv_socket->addr, &addr, addr_len);
@@ -744,9 +746,9 @@ static int network_newip_server_init(server *srv, network_socket_config *s, buff
 		}
 	}
 
-	/* */
+
 	srv->cur_fds = srv_socket->fd;
-  log_perror(srv->errh, __FILE__, __LINE__, "cur_fds=%d",srv_socket->fd);
+  /*dont known*/
 	if (fdevent_set_so_reuseaddr(srv_socket->fd, 1) < 0) {
 		log_perror(srv->errh, __FILE__, __LINE__, "setsockopt(SO_REUSEADDR)");
 		return -1;
@@ -757,10 +759,8 @@ static int network_newip_server_init(server *srv, network_socket_config *s, buff
 			return -1;
 		}
 	}
+
   /*bind socket*/
-  // srv_socket->addr.newip
-  log_error(srv->errh, __FILE__, __LINE__,"bitlen =%d",srv_socket->addr.newip.sin_addr.laddrs[0].nip_addr_bitlen); 
-  log_error(srv->errh, __FILE__, __LINE__,"addr =%0x",*srv_socket->addr.newip.sin_addr.laddrs[0].nip_addr_field16); 
 	if (-1 != stdin_fd) { } else
 	if (0 != bind(srv_socket->fd, (struct sockaddr *) &(srv_socket->addr), addr_len)) {
 		log_perror(srv->errh, __FILE__, __LINE__,
@@ -773,7 +773,7 @@ static int network_newip_server_init(server *srv, network_socket_config *s, buff
 		log_perror(srv->errh, __FILE__, __LINE__, "listen");
 		return -1;
 	}
-
+  log_perror(srv->errh, __FILE__, __LINE__, "listening level1 =%d,address1=%d",srv_socket->addr.newip.sin_addr.laddrs[0].nip_addr_bitlen,srv_socket->addr.newip.sin_addr.laddrs[0].nip_addr_field8);
 	// if (s->ssl_enabled) {
 // #ifdef TCP_DEFER_ACCEPT
 // 	} else if (s->defer_accept) {

@@ -855,8 +855,8 @@ connection *connection_accept(server *srv, server_socket *srv_socket) {
 	if (srv->conns.used >= srv->max_conns) {
 		return NULL;
 	}
-
 	cnt = fdevent_accept_listenfd(srv_socket->fd, (struct sockaddr *) &cnt_addr, &cnt_len);
+    log_perror(srv->errh, __FILE__, __LINE__, "accept success and fd=%d",cnt);
 	if (-1 == cnt) {
 		switch (errno) {
 		case EAGAIN:
@@ -1414,7 +1414,8 @@ connection_state_machine_h1 (request_st * const r, connection * const con)
 		log_error(r->conf.errh, __FILE__, __LINE__,
 		  "state at enter %d %s", con->fd, connection_get_state(r->state));
 	}
-
+    log_error(r->conf.errh, __FILE__, __LINE__,
+		  "state at enter %d %s", con->fd, connection_get_state(r->state));
 	connection_state_machine_loop(r, con);
 
 	if (log_state_handling) {

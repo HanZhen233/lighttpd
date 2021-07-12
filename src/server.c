@@ -1962,7 +1962,8 @@ int main (int argc, char **argv) {
         if (rc > 0) {
 
             server_main_loop(srv);
-
+			log_error(srv->errh, __FILE__, __LINE__,
+             "it can be here");
             if (graceful_shutdown || graceful_restart) {
                 server_graceful_state(srv);
             }
