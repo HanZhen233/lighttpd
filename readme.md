@@ -6,7 +6,7 @@
 
 1. 依赖相关
 ```shell
-sudo apt-get install  autoconf automake libtool libpcre3 libpcre3-dev  libbz2-dev
+sudo apt-get install  autoconf automake libtool libpcre3 libpcre3-dev  libbz2-dev zlib1g zlib1g-dev
 ```
 2. 编译与安装
 ```shell
